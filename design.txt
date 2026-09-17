@@ -1,0 +1,646 @@
+You are a senior PyQGIS plugin developer and computational-geometry engineer.
+
+Build a complete, installable QGIS Python plugin named “Topological Paste”.
+
+This must be a working plugin, not a Python-console snippet, a Processing
+model, or an explanation of how somebody could implement it.
+
+CORE PURPOSE
+
+Paste the geometries AND attributes currently on the clipboard into the
+currently active vector layer, using these rules:
+
+• Never create duplicate geometries.
+• Pasted features take priority over existing features.
+• Cut the pasted coverage out of existing features underneath it.
+• Delete existing features only when no geometry remains.
+• Preserve the attributes of existing portions that survive.
+• Assign the pasted attributes to the pasted coverage.
+• Produce valid, non-overlapping geometry with consistent shared boundaries
+  wherever this can be achieved safely.
+• Make the entire operation undoable as ONE QGIS editing command.
+
+“Underneath” means a spatial relationship in the active layer. It does not
+mean drawing order, selected features, visible features, or other layers.
+
+The main use case is polygon editing, including cadastral and zoning layers.
+
+Prioritize correctness, data preservation, and reliable native clipboard
+handling over extra UI features.
+
+────────────────────────────────────────────────────────────────────────
+1. COMPATIBILITY AND DEPENDENCIES
+────────────────────────────────────────────────────────────────────────
+
+Support recent QGIS 3.x installations using Qt5, and Qt6-based QGIS releases.
+
+The requested compatibility target also includes QGIS 5. Inspect the actual
+available QGIS documentation, Python bindings, and runtime before claiming
+support. Include QGIS 4/Qt6 rather than incorrectly treating QGIS 5 as the
+first Qt6 release.
+
+Declare the minimum supported QGIS version after auditing the APIs used.
+
+Use:
+- Python and the libraries bundled with QGIS.
+- qgis.core, qgis.gui, and qgis.PyQt.
+- QGIS geometry operations and its bundled geometry backend.
+- The Python standard library.
+
+Do not require pip installation, Shapely, GeoPandas, external executables,
+a database server, or another plugin.
+
+Put version differences in a small compatibility module. Handle QAction
+imports, scoped enums, dialog execution, field-type APIs, and changed QGIS
+geometry APIs through verified compatibility branches.
+
+Use topological equality through the appropriate available API, for example
+isTopologicallyEqual on versions exposing it and isGeosEqual on older
+versions. Do not confuse this with structural coordinate equality.
+
+Do not invent clipboard methods or assume a documented C++ class is
+available from Python.
+
+Windows is the primary deployment platform, but avoid unnecessary
+platform-specific implementation.
+
+────────────────────────────────────────────────────────────────────────
+2. EXACT POLYGON OVERWRITE SEMANTICS
+────────────────────────────────────────────────────────────────────────
+
+First snapshot and prepare all incoming geometries in the destination CRS.
+
+Give incoming features a deterministic order, recorded in the snapshot.
+Do not confuse this order with renderer order or the user's click order.
+
+If incoming features overlap one another, the LAST incoming feature wins
+within the overlap.
+
+For incoming polygons P1 ... Pn:
+
+    Q_i = P_i minus union(P_j for j > i)
+
+Q_i is the effective incoming coverage retaining P_i's attributes.
+
+A feature completely covered by later incoming features produces no output.
+Report it as superseded, not as a processing failure.
+
+Let:
+
+    U = union(all effective incoming polygons)
+
+For every affected existing polygon E:
+
+    R = E minus U
+
+Then:
+- If R is unchanged, leave E unchanged.
+- If R is nonempty, retain R with E's original ordinary attributes.
+- If R is empty, delete E.
+- Insert the effective incoming features with their mapped attributes.
+
+Apply the existing-feature reuse rules in section 3 before generating
+unnecessary delete-and-insert operations.
+
+Use the union only as a cutting mask. DO NOT dissolve all incoming features
+into one output feature or lose their separate attributes.
+
+Polygon holes must remain holes in the cutting mask. Existing coverage
+inside an incoming polygon's hole must not be erased merely because it
+lies inside that polygon's bounding box or outer ring.
+
+Features that merely share an edge or vertex must not be treated as
+overlapping areas.
+
+Do not use only overlaps() as the candidate predicate: containment and
+equality must also be handled.
+
+────────────────────────────────────────────────────────────────────────
+3. DUPLICATES, FEATURE IDENTITY, AND REPEATED PASTE
+────────────────────────────────────────────────────────────────────────
+
+Detect duplicate geometries topologically, not only by WKT/WKB equality.
+
+Different ring orientation, starting vertex, part order, or redundant
+collinear vertices must not allow geometrically identical features to
+be duplicated.
+
+Bounding boxes and hashes may accelerate candidate searches, but are not
+sufficient proof of equality.
+
+Compare the FINAL incoming output geometries, after overlap resolution and
+destination-type adaptation, against existing target features.
+
+When an incoming output geometry equals an existing target geometry:
+- Reuse the existing target feature.
+- Preserve its feature ID and managed primary key.
+- Update mapped writable attributes from the incoming feature.
+- Preserve existing values in fields absent from the source.
+- Do not replace the existing geometry representation unnecessarily.
+- If nothing changes, perform a true no-op.
+
+An explicit incoming NULL is different from an absent source field:
+a mapped NULL overwrites the existing value unless a constraint prevents it.
+
+If several existing features have the identical geometry:
+- Retain one deterministically.
+- Apply the incoming mapped attributes to the survivor.
+- Remove redundant copies within the overwrite footprint.
+- Report the consolidation and any attribute conflicts.
+
+The reuse optimization must not prevent trimming OTHER existing features
+that overlap that same incoming coverage.
+
+Repeatedly pasting the same clipboard snapshot with the same settings must
+not keep increasing feature counts or churning feature IDs. Test this
+explicitly, including overlapping incoming batches and singlepart targets.
+
+Do not globally deduplicate unrelated areas of the layer.
+
+────────────────────────────────────────────────────────────────────────
+4. NATIVE QGIS CLIPBOARD: MANDATORY
+────────────────────────────────────────────────────────────────────────
+
+The ordinary workflow must work:
+
+1. Select features in QGIS.
+2. Copy using QGIS's normal Copy Features command.
+3. Activate another compatible layer, or the same layer.
+4. Run Topological Paste.
+
+Read what was copied, not the current selection of the presumed source layer.
+
+Preserve:
+- Geometry and its precision.
+- Source field names and actual attribute values.
+- NULL values and available attribute types.
+- Source CRS.
+- Feature boundaries and a deterministic incoming order.
+- Which fields were actually present in the source.
+
+Do not implement a text-only clipboard reader and claim it fully supports
+native QGIS feature copying.
+
+Research the actual clipboard interfaces available to Python. If direct
+access is unavailable, implement a verified native scratch-layer extraction
+workflow or another tested approach that preserves the required information.
+
+Any staging workflow must:
+- Leave the real destination untouched during extraction.
+- Avoid unwanted clipping of incoming geometries by project intersection
+  settings.
+- Avoid modifying neighbouring layers through topological editing settings.
+- Avoid destination defaults or field conversion destroying source values
+  before field mapping is planned.
+- Preserve multipart geometries and detect unsupported mixed input.
+- Clean up only temporary objects created by this operation.
+- Restore temporary UI/project changes without overwriting unrelated changes.
+- Leave both the native QGIS clipboard and system clipboard usable.
+
+Do not assume that saving and restoring Qt MIME data alone also restores
+QGIS's internal feature clipboard.
+
+Never paste into the real target merely to inspect the result and then
+attempt to undo that temporary paste.
+
+Native clipboard support must also work when QGIS's text copy format is set
+to attributes only, if the internal clipboard still contains geometries.
+
+Plain WKT/EWKT, QGIS tabular WKT, and GeoJSON support are useful secondary
+formats, but must not replace the native workflow.
+
+For external clipboard data with unknown CRS, request a source CRS.
+Never silently assume the destination or map-canvas CRS.
+
+────────────────────────────────────────────────────────────────────────
+5. GEOMETRY TYPES AND MULTIPART RESULTS
+────────────────────────────────────────────────────────────────────────
+
+Fully implement Polygon and MultiPolygon.
+
+For a multipart-capable target:
+- Preserve all surviving parts in a compatible multipart feature.
+
+For a strictly singlepart target:
+- Split disconnected results into separate compatible features.
+- Preserve the original existing feature ID on one deterministic remainder,
+  preferably the largest-area part with a stable tie-break.
+- Create additional parts with the same ordinary attributes and valid new
+  managed identifiers.
+- Never keep only the largest part and discard the rest.
+
+Apply equivalent type adaptation to incoming features.
+
+Also support ordinary 2D point and line layers with explicit semantics:
+
+Points:
+- Incoming coincident points replace/update existing coincident points.
+- Resolve duplicates within incoming data deterministically.
+- For multipoints, remove only covered point components.
+
+Lines:
+- Remove coincident line portions from existing lines, retaining their
+  uncovered portions and attributes.
+- Resolve coincident portions within incoming data using incoming priority.
+- A crossing at a single point does not justify deleting either line.
+- Insert intersection vertices in affected lines for consistent 2D noding.
+- Do not invent a buffer width to turn lines into polygon cutters.
+
+Reject incompatible geometry families before any target mutation.
+
+For Z/M, curved, or other special geometry:
+- Implement and test an explicit preservation/conversion policy, or reject
+  the unsupported case before editing.
+- Do not silently drop dimensions, flatten curves, or fabricate values.
+- Do not claim full 3D topology from a 2D overlay operation.
+
+────────────────────────────────────────────────────────────────────────
+6. CRS, PRECISION, AND REPAIR
+────────────────────────────────────────────────────────────────────────
+
+Perform overlay operations in the destination layer's CRS.
+
+Use the project transformation context and verified CRS transformation APIs.
+Detect transformation failures before editing.
+
+Use planar geometry operations. Do not use ellipsoidal measurements for
+overlay decisions or change the layer CRS.
+
+Default to preserving coordinates:
+- No automatic positive/negative buffer cleanup.
+- No hidden snapping distance.
+- No arbitrary rounding.
+- No automatic removal of small positive-area polygons.
+
+Provide an optional advanced precision-grid setting, disabled by default.
+Show its units and explain that it can change coordinates.
+
+When enabled, use one consistent precision policy across all involved
+geometries and revalidate the resulting coverage. Do not independently snap
+only one side of a shared boundary.
+
+Keep computational validation tolerances separate from user-requested
+coordinate modification. A tolerance must not become permission to delete
+small features.
+
+Validate incoming and affected existing geometry.
+
+Attempt makeValid only on staged copies when appropriate. Preserve all
+polygonal parts, detect dimensional collapse, and report repair effects.
+
+Require explicit acceptance of material repairs. Abort when repair would
+cause unresolvable ambiguity or data loss.
+
+Distinguish:
+- A legitimate empty difference: the original feature was fully covered.
+- A failed geometry operation: an error, null result, or invalid output.
+
+Never interpret a geometry-operation failure as permission to delete a
+feature.
+
+────────────────────────────────────────────────────────────────────────
+7. SHARED BOUNDARIES AND TOPOLOGICAL SCOPE
+────────────────────────────────────────────────────────────────────────
+
+“No overlaps” and “valid individual geometries” are necessary but not the
+entire topology requirement.
+
+Node affected shared boundaries consistently:
+- Insert computed intersection vertices on both sides where appropriate.
+- Reconcile shared edges with different vertex segmentation without moving
+  the actual boundary by default.
+- Include touching neighbours when required for boundary consistency.
+- Keep all these edits within the same target layer and undo command.
+
+Do not rely solely on turning on QGIS's topological-editing checkbox.
+
+Do not turn the operation into a whole-layer cleanup.
+
+Preserve unrelated features and pre-existing holes/gaps outside the incoming
+coverage. Never invent a study-area boundary or assume every hole is an error.
+
+If old features already overlap outside U, subtracting U does not authorize
+arbitrary ownership decisions for the remaining old overlap. Preserve and
+report such pre-existing problems instead of silently assigning them to a
+feature.
+
+Report separately:
+- Topology successfully validated in the affected area.
+- Pre-existing issues left unchanged.
+- Issues that prevent a safe paste.
+
+Never report “the entire layer is topologically correct” unless that entire
+layer was actually checked against explicitly defined rules.
+
+────────────────────────────────────────────────────────────────────────
+8. ATTRIBUTES, DEFAULTS, AND CONSTRAINTS
+────────────────────────────────────────────────────────────────────────
+
+Map by actual field name, not column position.
+
+Default to exact-name matching. Offer a compact mapping override when
+necessary; never guess among ambiguous matches.
+
+For new incoming features:
+- Copy compatible mapped values.
+- Apply legitimate target defaults for missing fields.
+- Leave remaining missing fields NULL when permitted.
+
+For trimmed existing features:
+- Preserve their ordinary attributes.
+- Account explicitly for configured apply-on-update defaults and
+  provider-managed values.
+- Do not silently recompute arbitrary business fields.
+
+Preserve Unicode, dates, booleans, numeric values, zero, empty strings,
+and NULL correctly.
+
+Do not write joined, virtual, generated, or non-writable fields.
+
+Identify managed primary keys from provider/schema metadata, not merely
+because a field happens to be named “id” or “fid”.
+
+For new features and additional fragments, regenerate managed keys.
+For reused existing features, preserve them.
+
+Check required values, conversions, length/precision limits, and uniqueness
+against the planned final state, including pending edits.
+
+Do not silently change business identifiers to avoid a unique constraint.
+Report the conflict and prevent unsafe application.
+
+Do not automatically add fields to the target schema.
+
+Report unmapped source fields and lossy conversions before applying.
+
+Distinguish constraints that can be checked now from provider-side checks
+that occur only when the user later saves. Never claim the latter have
+already passed.
+
+Do not cascade edits or deletes into related layers.
+
+────────────────────────────────────────────────────────────────────────
+9. TWO-PHASE OPERATION AND UNDO SAFETY
+────────────────────────────────────────────────────────────────────────
+
+Use two phases.
+
+PHASE A — PLAN
+
+Capture the clipboard and active target layer, retrieve candidates, perform
+geometry operations on copies, map attributes, validate, and build an
+explicit change plan containing:
+- Existing feature IDs and their original state.
+- Geometry changes.
+- Attribute changes.
+- Deletions.
+- Insertions.
+- Repair/conflict diagnostics.
+
+Include the target's existing uncommitted edits in this snapshot.
+
+No real destination data may change during planning or preview.
+
+PHASE B — APPLY
+
+Before applying, verify that the target, schema, edit state, and relevant
+feature data have not changed since planning. Detect edits that introduce
+new spatial candidates too. Abort/replan a stale operation.
+
+Start editing only when needed and after user approval.
+
+Use one layer editing command:
+- beginEditCommand(...)
+- checked layer-level editing operations
+- endEditCommand() on success
+- destroyEditCommand() on failure
+
+Verify the actual API behavior for every supported version.
+
+Requirements:
+- One Undo restores the complete paste operation.
+- Redo reapplies it.
+- Previous user edits remain intact.
+- Never call commitChanges automatically on the target.
+- Never use whole-layer rollBack to recover this operation and destroy
+  pre-existing edits.
+- Do not bypass the edit buffer with direct provider writes.
+- Check every edit operation's return value.
+- On failure, cancellation, or exception, leave no partial target changes.
+- Restore selection and temporary UI state on failure.
+- Avoid nested active edit commands and re-entrant execution.
+
+Only report success after the planned changes have been applied and checked.
+
+Document and safely reject provider/transaction configurations in which
+these guarantees cannot be met.
+
+────────────────────────────────────────────────────────────────────────
+10. PERFORMANCE AND LAYER SCOPE
+────────────────────────────────────────────────────────────────────────
+
+Consider all spatially relevant target features, not only selected features
+or features visible in the canvas.
+
+Use spatial filtering/indexes and exact geometry predicates. Include added,
+changed, and deleted features from the current edit buffer correctly.
+
+Do not perform a full target scan for every incoming feature.
+Do not repeatedly rebuild the same union.
+Use local unions or spatially grouped masks where beneficial.
+
+If a provider subset filter prevents safely checking the full required
+coverage, stop with an explanation. Do not silently ignore hidden collisions
+or remove the user's filter.
+
+Provide progress and cancellation for large operations.
+
+Keep GUI and layer edits on the main thread. Any worker computation must use
+safe snapshots and must not access live GUI/layer objects unsafely.
+
+Avoid unsafe processEvents calls that allow the same action to run again
+or the target to change during an unguarded apply phase.
+
+────────────────────────────────────────────────────────────────────────
+11. UI
+────────────────────────────────────────────────────────────────────────
+
+Provide:
+- One clearly named toolbar action: “Topological Paste”.
+- A plugin menu entry, under the edit menu if possible.
+- A legible toolbar icon.
+- A configurable shortcut registered through QGIS.
+
+Do not replace normal Ctrl+V or intercept text pasting in forms.
+
+Capture the active layer when the action starts and display its name in
+the preview. Do not change the destination just because another layer
+becomes active during a temporary extraction step.
+
+Show a compact preview before destructive changes:
+- Incoming count.
+- New output features.
+- Existing features trimmed/deleted.
+- Existing features reused or attribute-updated.
+- Additional fragments.
+- Superseded incoming features.
+- Repairs, field conflicts, and topology warnings.
+
+Provide Apply and Cancel. Allow inspecting/highlighting affected geometry
+without permanently adding preview layers.
+
+Use the QGIS message bar for concise results and the message log for details.
+Keep settings in plugin settings.
+
+After success, select the inserted/reused incoming output features and
+refresh the layer.
+
+Do not force a large configuration wizard for every ordinary paste.
+
+────────────────────────────────────────────────────────────────────────
+12. VALIDATION AND ACCEPTANCE TESTS
+────────────────────────────────────────────────────────────────────────
+
+Implement automated tests using real QGIS geometries and editing APIs.
+
+For valid polygon inputs with coordinate modification disabled, verify:
+
+    union(output coverage)
+        = union(original target coverage, incoming coverage)
+
+subject only to a documented numerical validation tolerance.
+
+Verify no newly introduced positive-area overlaps, no lost positive-area
+fragments, correct attribute ownership, and correct feature identity reuse.
+
+Include at least these tests:
+
+A. Partial overlap:
+   Existing rectangle: (0,0)–(10,10), area 100.
+   Incoming rectangle: (5,0)–(15,10), area 100.
+   Expected: old remainder area 50, incoming area 100, union area 150.
+
+B. Full coverage:
+   Incoming polygon completely covers an existing feature.
+   Existing feature is deleted; incoming coverage remains.
+
+C. Containment:
+   Incoming polygon lies wholly inside an existing polygon.
+   Existing geometry becomes a polygon with a hole; incoming feature fills
+   that area with its own attributes.
+
+D. Split remainder:
+   Incoming strip cuts an existing polygon into disconnected pieces.
+   Preserve every piece for both singlepart and multipart destinations.
+
+E. Boundary contact:
+   Shared-edge and shared-vertex cases do not remove area.
+
+F. Identical geometry:
+   Same attributes produce a no-op.
+   Different attributes update the existing feature while preserving its ID.
+
+G. Equivalent representation:
+   Reversed rings, changed start vertex, reordered parts, and extra collinear
+   vertices do not defeat duplicate detection.
+
+H. Overlapping incoming batch:
+   Later input wins only within overlap. Separate attributes are preserved.
+
+I. Repeated paste:
+   Paste the same batch three times. No accumulating duplicates or
+   unnecessary feature ID changes.
+
+J. Holes and multipart inputs:
+   Existing coverage inside an incoming hole survives.
+
+K. Geometry robustness:
+   Repairable invalid polygon, unrepairable geometry, tiny valid fragments,
+   near-coincident edges, and a forced geometry-operation error.
+
+L. Attributes:
+   Different field order, absent fields versus explicit NULL, Unicode
+   including ő and ű, numeric zero, defaults, managed GeoPackage keys,
+   unique constraints, and non-writable fields.
+
+M. Clipboard:
+   Same-layer copy, cross-layer copy, native attributes-only text format,
+   changed source selection after copying, and copied data retained after
+   the source layer is no longer active.
+
+N. CRS:
+   Different source/destination CRS, a projected metric case such as
+   EPSG:23700, geographic coordinates, and unknown external clipboard CRS.
+
+O. QGIS settings:
+   Intersection-avoidance and topological-editing settings must not reverse
+   paste priority or modify other layers during staging.
+
+P. Editing:
+   Existing unsaved edits, temporary feature IDs, Undo/Redo, forced failure
+   after several edits, cancellation, and a stale preview.
+
+Q. Scope:
+   Off-screen/unselected intersecting features, subset-filter refusal, and
+   unrelated pre-existing topology problems.
+
+R. Lines and points:
+   Partial coincident lines, perpendicular crossings, duplicate points,
+   and partially coincident multipoints.
+
+S. Shared boundaries:
+   Adjacent polygons with unequal vertex segmentation are consistently
+   noded without changing their coverage.
+
+Test both memory layers and a temporary GeoPackage.
+
+Separate actual executed tests from tests supplied but not executed.
+Do not claim Qt6 or QGIS 5 runtime testing without having performed it.
+
+────────────────────────────────────────────────────────────────────────
+13. DELIVERABLES AND WORKFLOW
+────────────────────────────────────────────────────────────────────────
+
+First inspect the relevant APIs and runtime, then give a brief architecture
+plan and IMPLEMENT the plugin. Do not stop after the plan.
+
+Keep clipboard extraction, geometry planning, attribute mapping, validation,
+and edit application sufficiently separate to test independently.
+
+Deliver:
+- All plugin source files.
+- metadata.txt and __init__.py with classFactory.
+- Compatibility helpers.
+- Icon/resources requiring no separate user-side compilation.
+- Automated tests and a manual verification checklist.
+- README with installation, behavior, limitations, and compatibility matrix.
+- An installable ZIP with the correct single plugin-directory structure.
+
+Include comments explaining the non-obvious decisions, especially clipboard
+staging, incoming precedence, duplicate reuse, precision, and rollback.
+
+Do not leave core functionality as TODOs, placeholders, or pseudocode.
+
+If the execution environment lacks QGIS, still provide the complete code
+and runnable test suite, but clearly identify the tests that could not run.
+
+FINAL PRIORITY
+
+Never “succeed” by silently:
+- Dropping geometry fragments.
+- Losing clipboard attributes.
+- Guessing a CRS.
+- Clipping incoming polygons against the old layer.
+- Ignoring failed geometry operations.
+- Leaving partially edited data.
+- Claiming global topology correctness from a local check.
+
+The required behavior is:
+
+    PASTE NEW COVERAGE
+    → REMOVE OLD COVERAGE UNDER IT
+    → RETAIN OLD COVERAGE OUTSIDE IT
+    → PRESERVE ATTRIBUTE OWNERSHIP
+    → AVOID DUPLICATES
+    → VALIDATE
+    → APPLY AS ONE UNDOABLE EDIT

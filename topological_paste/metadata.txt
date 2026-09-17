@@ -1,0 +1,20 @@
+[general]
+name=Topological Paste
+qgisMinimumVersion=3.28
+qgisMaximumVersion=4.99
+supportsQt6=True
+description=Paste clipboard features into the active layer with overwrite semantics: pasted coverage wins, existing features underneath are trimmed (not duplicated), everything as one undoable edit.
+about=Pastes the geometries and attributes on the QGIS clipboard into the active vector layer. Pasted features take priority: their coverage is cut out of the existing features underneath, existing features are deleted only when nothing of them remains, surviving portions keep their attributes, identical geometries are reused instead of duplicated, shared boundaries are consistently noded, and the whole operation is a single Undo step. A preview is shown before anything is changed. Works with polygons (main use case: cadastral / zoning layers), lines and points. Requires no external Python packages.
+version=1.0.0
+author=danzig666
+email=5346511+danzig666@users.noreply.github.com
+tags=paste,clipboard,topology,overlap,digitizing,editing,cadastre,polygon
+category=Vector
+icon=icon.svg
+experimental=False
+deprecated=False
+hasProcessingProvider=no
+homepage=https://github.com/danzig666/qgis-topological-paste
+tracker=https://github.com/danzig666/qgis-topological-paste/issues
+repository=https://github.com/danzig666/qgis-topological-paste
+changelog=1.0.0 - first release
