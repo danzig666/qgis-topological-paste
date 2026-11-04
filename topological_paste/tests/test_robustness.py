@@ -30,6 +30,19 @@ class FailingDifference(GeometryOps):
         return QgsGeometry()
 
 
+class NoisyCover(GeometryOps):
+    """Rounding noise: relate() says "not covered", GEOS leaves only zero-area debris (a line)."""
+
+    def is_covered_by(self, geometry, mask):
+        return False
+
+    def _raw_difference(self, geometry, mask):
+        box = geometry.boundingBox()
+        return QgsGeometry.fromWkt(
+            "LINESTRING(%r %r,%r %r)" % (box.xMinimum(), box.yMinimum(), box.xMinimum(), box.yMaximum())
+        )
+
+
 class TestRobustness(QgisTestCase):
     def test_k_repairable_incoming_needs_acceptance(self):
         layer = make_layer(rows=[(wkt_rect(0, 0, 10, 4), ["old", 1])])
@@ -103,6 +116,27 @@ class TestRobustness(QgisTestCase):
         layer = make_layer(rows=[(wkt_rect(2, 2, 8, 8), ["old", 1])])
         plan, _ = paste(layer, make_snapshot([(wkt_rect(0, 0, 10, 10), {"name": "new", "n": 2})]), ops=FailingDifference())
         self.assertEqual(plan.count_deleted(), 1)
+
+    def test_cover_up_to_rounding_noise_deletes_the_covered_feature(self):
+        # relate() misses the cover by a few ulp, the difference holds no area: the mask
+        # demonstrably contains the whole area, so this is a full cover, not a failure
+        layer = make_layer(rows=[(wkt_rect(2, 2, 8, 8), ["old", 1])])
+        plan, _ = paste(layer, make_snapshot([(wkt_rect(0, 0, 10, 10), {"name": "new", "n": 2})]), ops=NoisyCover())
+        self.assertFalse(plan.blocking(), [i.message for i in plan.blocking()])
+        self.assertEqual(plan.count_deleted(), 1)
+
+    def test_lost_area_is_still_blocked(self):
+        # same degenerate result, but the mask covers only half the feature: a real failure
+        layer = make_layer(rows=[(wkt_rect(0, 0, 10, 10), ["old", 1])])
+        before = state(layer)
+        plan, result = paste(
+            layer, make_snapshot([(wkt_rect(5, 0, 15, 10), {"name": "new", "n": 2})]), ops=NoisyCover(),
+            expect_blocking=True,
+        )
+        self.assertIsNone(result)
+        self.assertTrue(any("lost every part" in i.message for i in plan.blocking()))
+        self.assertFalse(any(c.delete for c in plan.changes.values()))
+        self.assertEqual(state(layer), before)
 
     def test_precision_grid_is_opt_in_and_consistent(self):
         rows = [(wkt_rect(0, 0, 10.0004, 10), ["old", 1]), (wkt_rect(10.0004, 0, 20, 10), ["nb", 2])]
