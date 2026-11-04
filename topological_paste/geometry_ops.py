@@ -202,6 +202,13 @@ class GeometryOps(object):
             )
         parts = family_parts(result, dim)
         if not parts:
+            # GEOS returned a real (non-null) result with nothing of the family left: empty, or only
+            # lower-dimensional debris. That happens when the mask covers the input up to rounding
+            # noise - a boundary vertex lies a few ulp outside the mask, so relate() reports "not
+            # covered" although no area/length remains. Accept it as a full cover ONLY when an
+            # independent intersection confirms that the mask holds the entire measure of the input.
+            if self._covered_up_to_noise(geometry, mask, dim):
+                return []
             raise GeometryOpError("difference lost every part although the input is not fully covered")
         for part in parts:
             if not self.is_valid(part):
@@ -212,6 +219,26 @@ class GeometryOps(object):
 
     def _raw_difference(self, geometry, mask):
         return geometry.difference(mask)
+
+    def _covered_up_to_noise(self, geometry, mask, dim):
+        """Independent check: does ``geometry ∩ mask`` hold the whole measure of ``geometry``?
+
+        The slack is a numerical noise bound (noding tolerance times the perimeter for
+        polygons), not a cleanup size: a remainder of any real width still fails it.
+        """
+        total = measure(geometry, dim)
+        if total <= 0.0:
+            return False
+        inside = self.intersection_measure(geometry, mask, dim)
+        if dim == 0:
+            return inside >= total
+        tolerance = noding_tolerance(geometry.boundingBox())
+        if dim == 2:
+            # QgsGeometry.length() is 0 for polygons since QGIS 3.0; use the perimeter
+            slack = tolerance * max(geometry.constGet().perimeter(), 1.0)
+        else:
+            slack = tolerance
+        return abs(total - inside) <= slack + 1e-12 * total
 
     def intersection_measure(self, a, b, dim):
         result = a.intersection(b)
