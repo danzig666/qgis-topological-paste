@@ -1,0 +1,75 @@
+name: Release
+
+# Publishes a GitHub release with the plugin ZIP whenever main carries a
+# version (topological_paste/metadata.txt) that has no v<version> tag yet.
+# Merges that do not bump the version do nothing.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Read version and changelog
+        id: meta
+        run: |
+          python - <<'EOF'
+          import configparser, os
+          meta = configparser.ConfigParser()
+          meta.read("topological_paste/metadata.txt", encoding="utf-8")
+          general = meta["general"]
+          version = general["version"].strip()
+          entries = [line.strip() for line in general.get("changelog", "").splitlines() if line.strip()]
+          notes = entries[0] if entries else "Topological Paste %s" % version
+          prefix = version + " - "
+          if notes.startswith(prefix):
+              notes = notes[len(prefix):]
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write("version=%s\n" % version)
+          with open("release_notes.md", "w", encoding="utf-8") as f:
+              f.write(notes[:1].upper() + notes[1:] + "\n\n")
+              f.write("Install in QGIS via Plugins > Manage and Install Plugins > Install from ZIP.\n")
+          EOF
+
+      - name: Check for an existing tag
+        id: tag
+        run: |
+          if git rev-parse -q --verify "refs/tags/v${{ steps.meta.outputs.version }}" >/dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "v${{ steps.meta.outputs.version }} already exists - nothing to release."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build plugin ZIP
+        if: steps.tag.outputs.exists == 'false'
+        run: python build_zip.py
+
+      - name: Create tag and release
+        if: steps.tag.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          gh release create "v${VERSION}" "dist/topological_paste-${VERSION}.zip" \
+            --target "${GITHUB_SHA}" \
+            --title "Topological Paste ${VERSION}" \
+            --notes-file release_notes.md
